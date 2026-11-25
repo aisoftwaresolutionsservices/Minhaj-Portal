@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Class Master</title><link rel="stylesheet" href="assets/app.css"></head>
+<body>
+<header class="sch"><img id="sLogo" alt="" hidden><h1 id="sName">&nbsp;</h1><div class="mt" id="sMotto"></div><span class="ttl">Class Master</span></header>
+<main>
+ <form class="card" id="login" autocomplete="off">
+  <div class="grid">
+   <div><label for="sid">Staff ID</label><input id="sid" autocapitalize="characters" required></div>
+   <div><label for="pin">PIN</label><input id="pin" type="password" inputmode="numeric" required></div>
+   <div><button class="btn" id="go">Sign in</button></div>
+  </div><div id="lMsg"></div><div id="offList"></div>
+ </form>
+ <div class="card" id="pick" hidden>
+  <div class="bar"><div><b id="who"></b><div class="hint" id="term"></div></div><button class="btn2" type="button" id="out">Sign out</button></div>
+  <div id="pend"></div>
+  <div class="pick" id="cls" style="margin-top:10px"></div>
+ </div>
+ <div id="list"></div>
+</main>
+<footer class="co"><span></span></footer>
+<script src="assets/api.js"></script>
+<script>
+{
+/* Phone storage: prof:<staff> (no PIN/token) · cmrows:<key> last class list · cmdraft:<key> ratings not yet sent
+   key = staff|session|term|classId. Every tap is kept on the phone at once. */
+let S = null, C = null, D = {};
+chrome(); brand(); offlineChoices();
+const keyOf = classId => [S.staffId, S.session, S.term, classId].join('|');
+const drafts = () => S ? local.keys('cmdraft:' + S.staffId + '|').filter(k => Object.keys(local.get(k) || {}).length) : [];
+
+function offlineChoices() {
+  const ps = local.keys('prof:').map(k => local.get(k)).filter(p => p && p.cmClasses && p.cmClasses.length);
+  $('offList').innerHTML = ps.length ? '<p class="hint" style="margin-top:12px">No network? Continue on this phone and send later:</p>' +
+    ps.map(p => `<button type="button" class="btn2" data-off="${esc(p.staffId)}" style="margin:3px 6px 3px 0">Continue offline as ${esc(p.name)}</button>`).join('') : '';
+}
+$('offList').onclick = e => { const b = e.target.closest('[data-off]'); if (!b) return; S = Object.assign(local.get('prof:' + b.dataset.off), { token: null }); showPick(); };
+
+$('login').onsubmit = async e => {
+  e.preventDefault(); msg($('lMsg'), ''); $('go').disabled = true;
+  try { S = await api('staffLogin', { staffId: $('sid').value, pin: $('pin').value }); $('pin').value = '';
+    const prof = Object.assign({}, S); delete prof.token; local.set('prof:' + S.staffId, prof);
+    if (!S.cmClasses.length) { msg($('lMsg'), 'You are not a Class Master this term. Use the Score Entry page for your subjects.'); S = null; return; }
+    showPick(); if (drafts().length) sendAll();
+  } catch (x) { msg($('lMsg'), x.offline ? x.message + ' You can continue offline below if you signed in on this phone before.' : x.message); }
+  finally { $('go').disabled = false; }
+};
+function showPick() {
+  $('login').hidden = true; $('pick').hidden = false;
+  $('who').textContent = S.name + ' (' + S.staffId + ')';
+  $('term').textContent = S.term + ' · ' + S.session + (S.token ? '' : ' · OFFLINE: sign in with network to send');
+  const dk = drafts(), n = dk.reduce((a, k) => a + Object.keys(local.get(k)).length, 0);
+  $('pend').innerHTML = n ? `<div class="msg warn">${n} student rating(s) kept on this phone, not yet sent. ${S.token ? '<button class="btn" type="button" id="sendAll" style="margin-left:6px">Send now</button>' : 'Sign in with network to send them.'}</div>` : '';
+  $('cls').innerHTML = S.cmClasses.map((c, i) => `<button type="button" data-i="${i}"><b>${esc(c.className)}</b> <span class="hint">Rate Affective Domain</span></button>`).join('');
+  if (S.cmClasses.length === 1 && !C) openClass(0);
+}
+$('pend').onclick = e => { if (e.target.id === 'sendAll') sendAll(); };
+$('cls').onclick = e => { const b = e.target.closest('button'); if (b) openClass(+b.dataset.i); };
+async function openClass(i) {
+  const k = keyOf(S.cmClasses[i].classId);
+  $('list').innerHTML = '<div class="card">Loading…</div>';
+  try { if (!S.token) throw offline_('offline');
+    C = await api('cmClass', { token: S.token, classId: S.cmClasses[i].classId }); local.set('cmrows:' + k, C); }
+  catch (x) {
+    if (!x.offline) { $('list').innerHTML = `<div class="card"><div class="msg err">${esc(x.message)}</div></div>`; if (/sign in/i.test(x.message)) S.token = null; return; }
+    C = local.get('cmrows:' + k);
+    if (!C) { $('list').innerHTML = '<div class="card"><div class="msg warn">This class has not been opened on this phone before. Connect to the network once to load it.</div></div>'; return; }
+    C.offline = true;
+  }
+  C.key = k;
+  const saved = local.get('cmdraft:' + k) || {};
+  D = {}; C.students.forEach(s => D[s.sid] = saved[s.sid] || { aff: s.aff.slice(), att: s.att, hw: s.hw, comment: s.comment });
+  draw();
+}
+function keep(sid) {   // write this student's choices to the phone straight away
+  const all = local.get('cmdraft:' + C.key) || {}; const s = C.students.find(x => x.sid === sid);
+  all[sid] = Object.assign({ name: s.name }, D[sid]); local.set('cmdraft:' + C.key, all);
+}
+function draw() {
+  const n = C.students.filter(s => s.complete).length, dis = C.locked ? 'disabled' : '', pend = local.get('cmdraft:' + C.key) || {};
+  $('list').innerHTML = `<div class="card"><b>${esc(C.className)}</b> · <span id="cnt">${n} of ${C.students.length}</span> students sent
+   ${C.locked ? '<div class="msg warn">Results for this class have been generated, so ratings are locked. Ask Management to unlock if you need a correction.</div>'
+     : C.offline ? '<div class="msg warn">Working offline from the copy saved on this phone. Every tap is kept here and sent when you are online and signed in.</div>' : ''}</div>` +
+   C.students.map(s => { const d = D[s.sid];
+    return `<div class="card" data-sid="${esc(s.sid)}"><div class="bar"><b>${esc(s.name)}</b><span class="hint st">${esc(s.idn)} ${pend[s.sid] ? '· kept on phone, not sent' : s.complete ? '· ✓ sent' : ''}</span></div>
+    <div class="scroll"><table class="rt"><tbody>
+    ${C.items.map((it, i) => `<tr><td>${esc(it)}</td><td>${C.levels.map((l, j) => `<button type="button" class="chip ${d.aff[i] === j ? 'on' : ''}" data-k="aff" data-i="${i}" data-v="${j}" ${dis}>${esc(l)}</button>`).join('')}</td></tr>`).join('')}
+    <tr><td>Attendance scale</td><td>${C.scales.map(g => `<button type="button" class="chip ${d.att === g ? 'on' : ''}" data-k="att" data-v="${g}" ${dis}>${g}</button>`).join('')}</td></tr>
+    <tr><td>Handwriting scale</td><td>${C.scales.map(g => `<button type="button" class="chip ${d.hw === g ? 'on' : ''}" data-k="hw" data-v="${g}" ${dis}>${g}</button>`).join('')}</td></tr></tbody></table></div>
+    <label style="margin-top:8px" for="c${esc(s.sid)}">Comment (automatic from the average grade; you may edit)</label>
+    <textarea id="c${esc(s.sid)}" maxlength="160" ${dis}>${esc(d.comment)}</textarea>
+    <p><button class="btn" type="button" data-save ${dis}>${S.token ? 'Send' : 'Keep'} ${esc(s.name.split(' ')[0])}</button></p><div class="m"></div></div>`; }).join('');
+}
+async function sendOne(k, sid, d) {
+  const classId = k.split('|')[3];
+  await api('cmSave', { token: S.token, classId: classId, sid: sid, aff: d.aff, att: d.att, hw: d.hw, comment: d.comment });
+  const all = local.get('cmdraft:' + k) || {}; delete all[sid];
+  if (Object.keys(all).length) local.set('cmdraft:' + k, all); else local.del('cmdraft:' + k);
+  const R = local.get('cmrows:' + k);
+  if (R) { const s = R.students.find(x => x.sid === sid); if (s) Object.assign(s, { aff: d.aff, att: d.att, hw: d.hw, comment: d.comment, complete: true }); local.set('cmrows:' + k, R); }
+}
+$('list').addEventListener('input', e => { const card = e.target.closest('[data-sid]'); if (!card || e.target.tagName !== 'TEXTAREA') return;
+  D[card.dataset.sid].comment = e.target.value; keep(card.dataset.sid); });
+$('list').addEventListener('click', async e => {
+  const t = e.target, card = t.closest('[data-sid]'); if (!card) return;
+  const sid = card.dataset.sid, d = D[sid];
+  if (t.dataset.k) {
+    if (t.dataset.k === 'aff') d.aff[+t.dataset.i] = +t.dataset.v; else d[t.dataset.k] = t.dataset.v;
+    t.parentElement.querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b === t));
+    keep(sid); card.querySelector('.st').textContent = C.students.find(x => x.sid === sid).idn + ' · kept on phone, not sent';
+  }
+  if (t.dataset.save !== undefined) {
+    const miss = C.items.filter((x, i) => !(d.aff[i] >= 0)); if (!d.att) miss.push('Attendance scale'); if (!d.hw) miss.push('Handwriting scale');
+    const m = card.querySelector('.m');
+    if (miss.length) { msg(m, 'Still to rate: ' + miss.join(', ')); return; }
+    keep(sid);
+    if (!S.token) { msg(m, 'Kept on this phone. Sign in with network to send.', 'warn'); return; }
+    t.disabled = true;
+    try { await sendOne(C.key, sid, d);
+      C.students.find(s => s.sid === sid).complete = true; msg(m, 'Sent.', 'ok'); card.querySelector('.st').textContent = C.students.find(x => x.sid === sid).idn + ' · ✓ sent';
+      $('cnt').textContent = C.students.filter(s => s.complete).length + ' of ' + C.students.length; }
+    catch (x) { msg(m, x.offline ? 'No network. Kept on this phone; it will be sent when you are back online.' : x.message, x.offline ? 'warn' : 'err'); if (/sign in/i.test(x.message)) S.token = null; }
+    finally { t.disabled = false; }
+  }
+});
+async function sendAll() {
+  if (!S || !S.token) return;
+  let ok = 0; const fail = [];
+  for (const dk of drafts()) {
+    const k = dk.slice(8), all = local.get(dk) || {};
+    for (const sid of Object.keys(all)) {
+      const d = all[sid];
+      if (!(d.aff.every(v => v >= 0) && d.att && d.hw)) continue;        // not finished yet: stays on the phone
+      try { await sendOne(k, sid, d); ok++; }
+      catch (x) { if (x.offline) return; fail.push((d.name || sid) + ': ' + x.message); }
+    }
+  }
+  if (ok || fail.length) alertBox((ok ? '<b>Sent ' + ok + ' rating(s) kept on this phone.</b><br>' : '') + fail.map(esc).join('<br>'));
+  showPick();
+  if (C) { const i = S.cmClasses.findIndex(c => keyOf(c.classId) === C.key); if (i >= 0) openClass(i); }
+}
+window.addEventListener('online', () => { if (S && S.token) sendAll(); });
+$('out').onclick = () => { S = null; C = null; $('list').innerHTML = ''; $('pick').hidden = true; $('login').hidden = false; offlineChoices(); };
+}
+</script>
+</body></html>

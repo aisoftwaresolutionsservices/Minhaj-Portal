@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Parent Portal</title><link rel="stylesheet" href="assets/app.css"></head>
+<body>
+<header class="sch"><img id="sLogo" alt="" hidden><h1 id="sName">&nbsp;</h1><div class="mt" id="sMotto"></div><span class="ttl">Parent Portal · Check Result</span></header>
+<main>
+ <form class="card" id="f" autocomplete="off">
+  <p class="hint" style="margin-top:0">Enter the details the school gave you. The phone number must be the parent number registered with the school.</p>
+  <div class="grid">
+   <div><label for="sid">Student ID</label><input id="sid" inputmode="numeric" required></div>
+   <div><label for="pin">Parents PIN</label><input id="pin" type="password" inputmode="numeric" required></div>
+   <div><label for="gsm">Parent phone number</label><input id="gsm" type="tel" inputmode="tel" required></div>
+  </div>
+  <p><button class="btn" id="go">View result</button></p><div id="m"></div>
+ </form>
+ <div class="card" id="res" hidden>
+  <div class="bar"><div><b id="rName"></b><div class="hint" id="rInfo"></div></div><button class="btn2" type="button" id="again">Check another</button></div>
+  <p><a class="btn" id="dl" style="display:inline-block;text-decoration:none;padding:12px 18px;border-radius:6px">Download result (PDF)</a></p>
+  <p class="hint">The PDF opens in your phone's PDF viewer. Keep it or print it.</p>
+ </div>
+</main>
+<footer class="co"><span></span></footer>
+<script src="assets/api.js"></script>
+<script>
+{
+let url = '';
+chrome(); brand();
+$('f').onsubmit = async e => {
+  e.preventDefault(); msg($('m'), ''); $('go').disabled = true; $('go').textContent = 'Checking…';
+  try {
+    const r = await api('parentResult', { studentId: $('sid').value, pin: $('pin').value, gsm: $('gsm').value });
+    const bytes = Uint8Array.from(atob(r.b64), c => c.charCodeAt(0));
+    if (url) URL.revokeObjectURL(url);
+    url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    $('dl').href = url; $('dl').download = r.fileName;
+    $('rName').textContent = r.name; $('rInfo').textContent = r.cls + ' · ' + r.term + ' · ' + r.session;
+    $('f').hidden = true; $('res').hidden = false; $('pin').value = '';
+  } catch (x) { msg($('m'), x.message); }
+  finally { $('go').disabled = false; $('go').textContent = 'View result'; }
+};
+$('again').onclick = () => { $('res').hidden = true; $('f').hidden = false; ['sid', 'pin', 'gsm'].forEach(i => $(i).value = ''); };
+}
+</script>
+</body></html>

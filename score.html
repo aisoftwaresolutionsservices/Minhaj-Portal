@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Score Entry</title><link rel="stylesheet" href="assets/app.css"></head>
+<body>
+<header class="sch"><img id="sLogo" alt="" hidden><h1 id="sName">&nbsp;</h1><div class="mt" id="sMotto"></div><span class="ttl">Score Entry</span></header>
+<main>
+ <!-- 1. Sign in -->
+ <form class="card" id="login" autocomplete="off">
+  <div class="grid">
+   <div><label for="sid">Staff ID</label><input id="sid" autocapitalize="characters" required></div>
+   <div><label for="pin">PIN</label><input id="pin" type="password" inputmode="numeric" required></div>
+   <div><button class="btn" id="go">Sign in</button></div>
+  </div><div id="lMsg"></div><div id="offList"></div>
+ </form>
+ <!-- 2. Pick class + subject -->
+ <div class="card" id="pick" hidden>
+  <div class="bar"><div><b id="who"></b><div class="hint" id="term"></div></div><button class="btn2" type="button" id="out">Sign out</button></div>
+  <div id="pend"></div>
+  <p class="hint">Choose the class and subject to score:</p><div class="pick" id="subs"></div>
+ </div>
+ <!-- Exam questions: upload one PDF per class + subject (needs network) -->
+ <div class="card" id="exams" hidden></div>
+ <!-- 3. Scores -->
+ <div class="card" id="sheet" hidden>
+  <div class="bar"><div><b id="title"></b><div class="hint" id="maxes"></div></div><button class="btn2" type="button" id="back">Change subject</button></div>
+  <div id="lock"></div><div id="sMsg"></div>
+  <div class="scroll" style="margin-top:8px"><table class="sc"><thead><tr><th>Student</th><th>CA1</th><th>CA2</th><th>Exam</th><th style="text-align:right">Total</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <p class="hint">Leave a box empty if the score is not ready yet. 0 means the student scored zero. Every score you type is kept on this phone at once, even with no network, until it is sent.</p>
+ </div>
+</main>
+<div class="dock" id="dock" hidden><span class="hint" id="dTxt">No changes</span><button class="btn" id="save" disabled>Save scores</button></div>
+<footer class="co"><span></span></footer>
+<script src="assets/api.js"></script>
+<script>
+{
+/* S = signed-in teacher (token only while signed in online). CUR = open class+subject.
+   Phone storage:  prof:<staff>  teacher's subjects (no PIN, no token)
+                   rows:<key>    last copy of the class list from the server
+                   draft:<key>   scores typed but not yet sent            key = staff|session|term|classId|subCode */
+let S = null, CUR = null, ORIG = {};
+chrome(); brand(); offlineChoices();
+
+const keyOf = (al) => [S.staffId, S.session, S.term, al.classId, al.subCode].join('|');
+const drafts = () => S ? local.keys('draft:' + S.staffId + '|').filter(k => Object.keys(local.get(k) || {}).length) : [];
+
+function offlineChoices() {
+  const ps = local.keys('prof:').map(k => local.get(k)).filter(Boolean);
+  $('offList').innerHTML = ps.length ? '<p class="hint" style="margin-top:12px">No network? Continue on this phone and send later:</p>' +
+    ps.map((p, i) => `<button type="button" class="btn2" data-off="${esc(p.staffId)}" style="margin:3px 6px 3px 0">Continue offline as ${esc(p.name)}</button>`).join('') : '';
+}
+$('offList').onclick = e => { const b = e.target.closest('[data-off]'); if (!b) return; S = Object.assign(local.get('prof:' + b.dataset.off), { token: null }); showPick(); };
+
+$('login').onsubmit = async e => {
+  e.preventDefault(); msg($('lMsg'), ''); $('go').disabled = true;
+  try {
+    S = await api('staffLogin', { staffId: $('sid').value, pin: $('pin').value }); $('pin').value = '';
+    const prof = Object.assign({}, S); delete prof.token; local.set('prof:' + S.staffId, prof);
+    showPick(); if (drafts().length) sendAll();
+  } catch (x) { msg($('lMsg'), x.offline ? x.message + ' You can continue offline below if you signed in on this phone before.' : x.message); }
+  finally { $('go').disabled = false; }
+};
+function showPick() {
+  $('login').hidden = true; $('sheet').hidden = true; $('dock').hidden = true; $('pick').hidden = false;
+  $('who').textContent = S.name + ' (' + S.staffId + ')';
+  $('term').textContent = S.term + ' · ' + S.session + (S.token ? '' : ' · OFFLINE: sign in with network to send');
+  const dk = drafts();
+  $('pend').innerHTML = dk.length ? `<div class="msg warn">${dk.length} subject(s) have scores kept on this phone, not yet sent. ${S.token ? '<button class="btn" type="button" id="sendAll" style="margin-left:6px">Send now</button>' : 'Sign in with network to send them.'}</div>` : '';
+  $('subs').innerHTML = S.subjects.length ? S.subjects.map((x, i) => { const n = Object.keys(local.get('draft:' + keyOf(x)) || {}).length;
+    return `<button type="button" data-i="${i}"><b>${esc(x.className)}</b> · ${esc(x.subject)} <span class="hint">${esc(x.subCode)}</span>${n ? ` <span class="hint" style="color:#c1121f">· ${n} unsent</span>` : ''}</button>`; }).join('')
+    : '<p class="hint">No subjects are allocated to you this term.</p>';
+  loadExams();
+}
+$('pend').onclick = e => { if (e.target.id === 'sendAll') sendAll(); };
+
+/* ---------- Exam questions (Exams Bank) ---------- */
+async function loadExams() {
+  const box = $('exams');
+  if (!S.token) { box.hidden = true; return; }
+  box.hidden = false; box.innerHTML = '<b>Exam questions</b><p class="hint">Loading…</p>';
+  try {
+    const d = await api('examStatus', { token: S.token });
+    box.innerHTML = '<b>Exam questions</b><p class="hint">Upload ONE PDF per class and subject. In Word use File › Save As › PDF. You can replace it until the Exam Officer approves it.</p>' +
+      d.papers.map((x, i) => `<div style="border-top:1px solid var(--line);padding:8px 0" data-e="${i}">
+        <div class="bar"><div><b>${esc(x.className)}</b> · ${esc(x.subject)} <span class="hint">${esc(x.subCode)}</span></div><span class="hint"><b>${esc(x.status)}</b>${x.uploadedAt ? ' · ' + esc(x.uploadedAt) : ''}</span></div>
+        ${x.note ? `<div class="msg warn">Exam Officer: ${esc(x.note)}</div>` : ''}
+        <div class="bar" style="justify-content:flex-start;margin-top:6px">${x.status !== 'Approved' ? `<label class="btn2" style="display:inline-block;cursor:pointer">${x.status === 'Not uploaded' ? 'Upload PDF' : 'Replace PDF'}<input type="file" accept="application/pdf,.pdf" hidden data-up="${i}"></label>` : ''}
+        ${x.status !== 'Not uploaded' ? `<button type="button" class="btn2" data-dl="${i}">Download my paper</button>` : ''}</div><div class="m"></div></div>`).join('');
+    box._papers = d.papers;
+  } catch (x) { box.innerHTML = '<b>Exam questions</b>' + `<div class="msg ${x.offline ? 'warn' : 'err'}">${esc(x.offline ? 'Exam questions need network. Connect to upload.' : x.message)}</div>`; }
+}
+$('exams').addEventListener('change', async e => {
+  const inp = e.target; if (inp.dataset.up === undefined || !inp.files[0]) return;
+  const x = $('exams')._papers[+inp.dataset.up], m = inp.closest('[data-e]').querySelector('.m'), file = inp.files[0];
+  if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') { msg(m, 'Only PDF files. In Word use File › Save As › PDF.'); return; }
+  if (file.size > 8 * 1024 * 1024) { msg(m, 'The file is too big. Maximum 8 MB.'); return; }
+  msg(m, 'Uploading…', 'warn');
+  try {
+    const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Could not read the file.')); r.readAsDataURL(file); });
+    await api('examUpload', { token: S.token, classId: x.classId, subCode: x.subCode, b64: b64 });
+    await loadExams();
+    alertBox('<b>Uploaded.</b> ' + esc(x.className + ' · ' + x.subject) + ' is now waiting for the Exam Officer.');
+  } catch (er) { msg(m, er.message); }
+});
+$('exams').addEventListener('click', async e => {
+  const b = e.target.closest('[data-dl]'); if (!b) return;
+  const x = $('exams')._papers[+b.dataset.dl]; b.disabled = true;
+  try { const r = await api('examDownload', { token: S.token, classId: x.classId, subCode: x.subCode });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([Uint8Array.from(atob(r.b64), c => c.charCodeAt(0))], { type: 'application/pdf' })); a.download = r.fileName; document.body.appendChild(a); a.click(); a.remove(); }
+  catch (er) { alertBox(esc(er.message)); } finally { b.disabled = false; }
+});
+$('subs').onclick = async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const al = S.subjects[+b.dataset.i], k = keyOf(al); b.disabled = true;
+  try {
+    if (!S.token) throw offline_('offline');
+    CUR = await api('getScores', { token: S.token, classId: al.classId, subCode: al.subCode }); local.set('rows:' + k, CUR);
+  } catch (x) {
+    if (!x.offline) { alertBox(esc(x.message)); if (/sign in/i.test(x.message)) S.token = null; }
+    CUR = local.get('rows:' + k);
+    if (!CUR) { b.disabled = false; alertBox('This class has not been opened on this phone before. Connect to the network once to load it.'); return; }
+    CUR.offline = true;
+  }
+  b.disabled = false; CUR.key = k; draw();
+};
+function draw() {
+  $('pick').hidden = true; $('exams').hidden = true; $('sheet').hidden = false; $('dock').hidden = false; msg($('sMsg'), '');
+  $('title').textContent = CUR.className + ' · ' + CUR.subject;
+  $('maxes').textContent = 'Maximum: CA1 ' + CUR.max.CA1 + ' · CA2 ' + CUR.max.CA2 + ' · Exam ' + CUR.max.EXAM;
+  $('lock').innerHTML = CUR.locked ? '<div class="msg warn">Results for this class have been generated, so scores are locked. Ask Management to unlock if a correction is needed.</div>'
+    : CUR.offline ? '<div class="msg warn">Working offline from the copy saved on this phone. Your scores are kept here and sent when you are online and signed in.</div>' : '';
+  const D = local.get('draft:' + CUR.key) || {};
+  ORIG = {};
+  const dis = CUR.locked ? 'disabled' : '';
+  $('rows').innerHTML = CUR.rows.map(r => { ORIG[r.id] = [r.ca1, r.ca2, r.exam].join('|'); const d = D[r.id], v = d ? [d.ca1, d.ca2, d.exam] : [r.ca1, r.ca2, r.exam];
+    return `<tr data-id="${esc(r.id)}"><td>${esc(r.name)}<div class="hint">${esc(r.idn)}</div></td>
+    ${['ca1', 'ca2', 'exam'].map((f, j) => `<td><input inputmode="decimal" data-f="${f}" value="${esc(v[j])}" class="${d ? 'chg' : ''}" aria-label="${esc(r.name)} ${f}" ${dis}></td>`).join('')}<td class="n">${tot(...v)}</td></tr>`; }).join('');
+  $('rows').querySelectorAll('input').forEach(check); dirty();
+}
+const tot = (...v) => v.reduce((a, x) => a + (parseFloat(x) || 0), 0);
+function check(inp) {   // same rule as the server: blank, or 0..max in steps of .5
+  const t = inp.value.trim(), max = { ca1: CUR.max.CA1, ca2: CUR.max.CA2, exam: CUR.max.EXAM }[inp.dataset.f];
+  const bad = t !== '' && (!/^\d{1,3}(\.5)?$/.test(t) || +t > max);
+  inp.classList.toggle('bad', bad); inp.title = bad ? 'Score must be from 0 to ' + max : ''; return !bad;
+}
+const rowVals = tr => [...tr.querySelectorAll('input')].map(i => i.value.trim());
+function changed() { return [...$('rows').rows].filter(tr => rowVals(tr).join('|') !== ORIG[tr.dataset.id]); }
+function keepDraft() {   // every keystroke: write the changed rows to the phone
+  const D = {};
+  changed().forEach(tr => { const v = rowVals(tr); D[tr.dataset.id] = { name: tr.cells[0].firstChild.textContent, ca1: v[0], ca2: v[1], exam: v[2] }; });
+  if (Object.keys(D).length) local.set('draft:' + CUR.key, D); else local.del('draft:' + CUR.key);
+}
+function dirty() {
+  const ch = changed(), bad = $('rows').querySelectorAll('input.bad').length;
+  $('dTxt').textContent = bad ? bad + ' box(es) need fixing' : ch.length ? ch.length + ' student(s) kept on this phone, not sent yet' : 'Everything sent';
+  $('save').disabled = !ch.length || !!bad || CUR.locked;
+  $('save').textContent = S.token ? 'Send scores' : 'Kept on phone';
+}
+$('rows').addEventListener('input', e => { const i = e.target; if (!i.dataset.f) return; check(i); i.classList.add('chg');
+  const tr = i.closest('tr'); tr.cells[4].textContent = tot(...rowVals(tr)); keepDraft(); dirty(); });
+
+/* Send one draft (one class+subject). Returns true when the server accepted it. */
+async function sendKey(k) {
+  const D = local.get('draft:' + k); if (!D || !Object.keys(D).length) return true;
+  const [, , , classId, subCode] = k.split('|');
+  const scores = Object.keys(D).map(id => Object.assign({ id: id }, D[id]));
+  await api('saveScores', { token: S.token, classId: classId, subCode: subCode, scores: scores });
+  const R = local.get('rows:' + k);                        // update the phone copy to what the server now holds
+  if (R) { R.rows.forEach(r => { const d = D[r.id]; if (d) { r.ca1 = d.ca1; r.ca2 = d.ca2; r.exam = d.exam; } }); local.set('rows:' + k, R); }
+  local.del('draft:' + k);
+  return scores.length;
+}
+$('save').onclick = async () => {
+  if (!S.token) { msg($('sMsg'), 'Kept on this phone. Sign in with network to send.', 'warn'); return; }
+  $('save').disabled = true; $('save').textContent = 'Sending…';
+  try { const n = await sendKey(CUR.key);
+    CUR.rows.forEach(r => { const tr = $('rows').querySelector(`tr[data-id="${CSS.escape(r.id)}"]`); const v = rowVals(tr); r.ca1 = v[0]; r.ca2 = v[1]; r.exam = v[2]; ORIG[r.id] = v.join('|'); });
+    $('rows').querySelectorAll('.chg').forEach(i => i.classList.remove('chg'));
+    msg($('sMsg'), 'Sent ' + n + ' student(s) to the school system.', 'ok'); }
+  catch (x) { msg($('sMsg'), x.offline ? 'No network. Your scores are kept on this phone and will be sent when you are back online.' : x.message, x.offline ? 'warn' : 'err');
+    if (/sign in/i.test(x.message)) S.token = null; }
+  finally { dirty(); $('sMsg').scrollIntoView({ block: 'nearest' }); }
+};
+async function sendAll() {
+  if (!S || !S.token) return;
+  let ok = 0, fail = [];
+  for (const k of drafts()) {
+    try { await sendKey(k.slice(6)); ok++; }
+    catch (x) { if (x.offline) return; const al = S.subjects.find(a => keyOf(a) === k.slice(6)); fail.push((al ? al.className + ' ' + al.subject : 'A subject') + ': ' + x.message); }
+  }
+  if (ok || fail.length) alertBox((ok ? '<b>Sent ' + ok + ' subject(s) kept on this phone.</b><br>' : '') + fail.map(esc).join('<br>'));
+  if (!$('pick').hidden) showPick();
+}
+window.addEventListener('online', () => { if (S && S.token) sendAll(); });   // signal is back: send automatically
+$('back').onclick = () => showPick();
+function signOut() { S = null; CUR = null; $('exams').hidden = true; $('pick').hidden = true; $('sheet').hidden = true; $('dock').hidden = true; $('login').hidden = false; offlineChoices(); }
+$('out').onclick = signOut;
+}
+</script>
+</body></html>
