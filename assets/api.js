@@ -5,7 +5,7 @@
  * Nothing secret lives here: this file is public on GitHub. The server checks every PIN.
  */
 const CONFIG = {
-  API_URL: '',                 // e.g. 'https://script.google.com/macros/s/AKfy.../exec'
+  API_URL: 'https://script.google.com/macros/s/AKfycby8Cfwyff_gbPSGNusJ96cd6Evac6UAJmuMJbnBxbKsagB8wU8Acl-_UNElviv9J8ylBA/exec',                 // e.g. 'https://script.google.com/macros/s/AKfy.../exec'
   COMPANY: 'Accounting and Database Management Customized Software By: A.I. Software Solutions · 08065725007, 08166565829'
 };
 const DEMO = !CONFIG.API_URL;
